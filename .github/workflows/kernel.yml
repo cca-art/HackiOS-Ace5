@@ -70,7 +70,6 @@ jobs:
           fi
           ls -lh "$TOOLCHAIN"
 
-          echo "=== extracting to a scratch dir to discover the layout ==="
           rm -rf /tmp/tc && mkdir -p /tmp/tc
           tar -xJf "$TOOLCHAIN" -C /tmp/tc
           find /tmp/tc -maxdepth 4 2>/dev/null | head -40 || true
@@ -113,6 +112,44 @@ jobs:
           fi
           du -sh "$THEOS/sdks"
           echo "SDK OK"
+
+      - name: Pre-seed macOS 13.3 SDK (workaround for the 504)
+        run: |
+          set -eu
+          mkdir -p xnu-deps
+          cd xnu-deps
+          SDK=macos-sdk.tar.xz
+          SHA=518e35eae6039b3f64e8025f4525c1c43786cc5cf39459d609852faf091e34be
+          URL_API="https://api.github.com/repos/joseluisq/macosx-sdks/releases/assets/122062330"
+          URL_REL="https://github.com/joseluisq/macosx-sdks/releases/download/13.3/MacOSX13.3.sdk.tar.xz"
+
+          ok=0
+          for attempt in 1 2 3; do
+            echo "---- attempt $attempt ----"
+            if curl -fL --retry 4 --retry-delay 5 --retry-all-errors \
+                 --connect-timeout 30 --max-time 900 \
+                 -H 'Accept: application/octet-stream' \
+                 --no-progress-meter -o "$SDK" "$URL_API"; then ok=1; break; fi
+            echo "== API asset failed, trying release URL"
+            if curl -fL --retry 2 --retry-delay 5 --retry-all-errors \
+                 --connect-timeout 30 --max-time 900 \
+                 --no-progress-meter -o "$SDK" "$URL_REL"; then ok=1; break; fi
+            sleep $((attempt * 15))
+          done
+          [ "$ok" = 1 ] || { echo "!! SDK download failed"; exit 1; }
+
+          ls -lh "$SDK"
+          echo "$SHA  $SDK" | sha256sum -c -
+          tar -xJf "$SDK" --wildcards '*MacOSX13.3.sdk/System/Library/Frameworks/Kernel.framework*'
+          rm -f "$SDK"
+
+          if [ ! -d MacOSX13.3.sdk/System/Library/Frameworks/Kernel.framework/Headers/DriverKit ]; then
+            echo "!! DriverKit headers missing after extract; tree:"
+            find . -maxdepth 4 -type d 2>/dev/null | head -40 || true
+            exit 1
+          fi
+          du -sh MacOSX13.3.sdk
+          echo "SDK pre-seeded OK"
 
       - name: Stage 1 - sources, host tools, SDK
         run: bash xnu-deps/setup.sh --stage1
