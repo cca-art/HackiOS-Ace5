@@ -1,146 +1,76 @@
-name: HackiOS Ace 5 kernel (Linux ARM64)
+name: HackiOS Ace 5 kernel
 
 on:
   workflow_dispatch:
-    inputs:
-      jobs:
-        description: 'jobs'
-        required: false
-        default: ''
 
 jobs:
   kernel:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 240
     steps:
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc 2>/dev/null || true
-          sudo rm -rf /opt/hostedtoolcache/CodeQL 2>/dev/null || true
-          df -h /
-
       - uses: actions/checkout@v4
 
-      - name: Install build dependencies
+      - name: deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            build-essential git curl wget xz-utils \
-            clang-18 lld-18 llvm-18 \
-            flex bison m4 perl autoconf automake libtool pkg-config \
-            libncurses-dev python3 python3-venv python3-pip \
-            meson ninja-build nasm uuid-dev libssl-dev
-          sudo update-alternatives --install /usr/bin/clang   clang   /usr/bin/clang-18   100
-          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100
-          clang --version
-          dsymutil-18 --version | head -1 || true
+          sudo apt-get install -y build-essential git curl wget xz-utils clang-18 lld-18 llvm-18 flex bison m4 perl autoconf automake libtool pkg-config libncurses-dev python3 python3-venv python3-pip meson ninja-build nasm uuid-dev libssl-dev
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          df -h / | tail -1
 
-      - name: Install Theos toolchain
+      - name: theos-toolchain
         run: |
-          set -eu
-          export THEOS="$PWD/local/theos"
+          set -ex
+          THEOS=$PWD/local/theos
           mkdir -p "$THEOS/toolchain"
-
-          TOOLCHAIN=/tmp/ios-toolchain-arm64.tar.xz
-          URL_REL="https://github.com/L1ghtmann/llvm-project/releases/download/test-210562a/iOSToolchain-aarch64.tar.xz"
-          URL_API="https://api.github.com/repos/L1ghtmann/llvm-project/releases/assets/124872377"
-
-          fetch() {
-            echo "== trying $1"
-            curl -fL --retry 4 --retry-delay 5 --retry-all-errors \
-                 --connect-timeout 30 --max-time 900 \
-                 -H 'Accept: application/octet-stream' \
-                 --no-progress-meter -o "$TOOLCHAIN" "$1"
-          }
-
-          ok=0
-          for attempt in 1 2 3; do
-            echo "---- attempt $attempt ----"
-            if fetch "$URL_API" && xz -t "$TOOLCHAIN" 2>/dev/null; then ok=1; break; fi
-            echo "== API asset failed (attempt $attempt), trying release URL"
-            if fetch "$URL_REL" && xz -t "$TOOLCHAIN" 2>/dev/null; then ok=1; break; fi
-            echo "== release URL failed (attempt $attempt), waiting"
-            sleep $((attempt * 20))
-          done
-          if [ "$ok" != 1 ]; then
-            echo "== falling back to wget"
-            rm -f "$TOOLCHAIN"
-            wget -q --tries=5 --timeout=60 -O "$TOOLCHAIN" "$URL_API"
-            xz -t "$TOOLCHAIN"
-          fi
-          ls -lh "$TOOLCHAIN"
-
-          rm -rf /tmp/tc && mkdir -p /tmp/tc
-          tar -xJf "$TOOLCHAIN" -C /tmp/tc
-          find /tmp/tc -maxdepth 4 2>/dev/null | head -40 || true
-
-          LD=$(find /tmp/tc -type f -name ld -path '*linux/iphone/bin/*' 2>/dev/null | head -1 || true)
-          if [ -z "$LD" ]; then
-            echo "!! no linux/iphone/bin/ld in the archive; every 'ld' found:"
-            find /tmp/tc -type f -name 'ld*' 2>/dev/null | head -20 || true
-            exit 1
-          fi
-          SRC=$(cd "$(dirname "$LD")/../../.." && pwd)
-          echo "== toolchain root inside archive: $SRC"
-          cp -a "$SRC"/. "$THEOS/toolchain"/
-          rm -rf /tmp/tc "$TOOLCHAIN"
-
-          if [ ! -x "$THEOS/toolchain/linux/iphone/bin/ld" ]; then
-            echo "!! ld still missing after copy"
-            ls -R "$THEOS/toolchain" 2>/dev/null | head -60 || true
-            exit 1
-          fi
-          echo "== ld OK"
-          ls "$THEOS/toolchain/linux/iphone/bin" 2>/dev/null | head -30 || true
+          curl -fL --retry 6 --retry-delay 5 --retry-all-errors -H "Accept: application/octet-stream" -o /tmp/tc.tar.xz https://api.github.com/repos/L1ghtmann/llvm-project/releases/assets/124872377
+          xz -t /tmp/tc.tar.xz
+          tar -xJf /tmp/tc.tar.xz -C "$THEOS/toolchain"
+          ls "$THEOS/toolchain/linux/iphone/bin" | head -20
           echo "THEOS=$THEOS" >> "$GITHUB_ENV"
 
-      - name: Install Theos SDK (sparse)
+      - name: theos-sdk
         run: |
-          set -eu
-          export THEOS="$PWD/local/theos"
-          git clone --filter=blob:none --sparse --depth 1 --no-checkout \
-            https://github.com/theos/sdks.git "$THEOS/sdks"
+          set -ex
+          git clone --filter=blob:none --sparse --depth 1 https://github.com/theos/sdks.git "$THEOS/sdks"
           cd "$THEOS/sdks"
-          git sparse-checkout init --cone
           git sparse-checkout set iPhoneOS16.5.sdk
-          git fetch --depth 1 origin 0222fd5413cf4b9af096f37b4621afa2688572f7
-          git checkout 0222fd5413cf4b9af096f37b4621afa2688572f7
-          if [ ! -d "$THEOS/sdks/iPhoneOS16.5.sdk/usr/include" ]; then
-            echo "!! SDK missing"
-            ls -R "$THEOS/sdks" 2>/dev/null | head -40 || true
-            exit 1
-          fi
-          du -sh "$THEOS/sdks"
-          echo "SDK OK"
+          ls "$THEOS/sdks/iPhoneOS16.5.sdk/usr/include" | head -20
 
-      - name: Pre-seed macOS 13.3 SDK (workaround for the 504)
+      - name: macos-sdk
         run: |
-          set -eu
+          set -ex
           mkdir -p xnu-deps
           cd xnu-deps
-          SDK=macos-sdk.tar.xz
-          SHA=518e35eae6039b3f64e8025f4525c1c43786cc5cf39459d609852faf091e34be
-          URL_API="https://api.github.com/repos/joseluisq/macosx-sdks/releases/assets/122062330"
-          URL_REL="https://github.com/joseluisq/macosx-sdks/releases/download/13.3/MacOSX13.3.sdk.tar.xz"
+          curl -fL --retry 6 --retry-delay 5 --retry-all-errors -H "Accept: application/octet-stream" -o sdk.tar.xz https://api.github.com/repos/joseluisq/macosx-sdks/releases/assets/122062330
+          echo "518e35eae6039b3f64e8025f4525c1c43786cc5cf39459d609852faf091e34be  sdk.tar.xz" | sha256sum -c -
+          tar -xJf sdk.tar.xz --wildcards "*MacOSX13.3.sdk/System/Library/Frameworks/Kernel.framework*"
+          rm -f sdk.tar.xz
+          ls MacOSX13.3.sdk/System/Library/Frameworks/Kernel.framework/Headers | head -20
 
-          ok=0
-          for attempt in 1 2 3; do
-            echo "---- attempt $attempt ----"
-            if curl -fL --retry 4 --retry-delay 5 --retry-all-errors \
-                 --connect-timeout 30 --max-time 900 \
-                 -H 'Accept: application/octet-stream' \
-                 --no-progress-meter -o "$SDK" "$URL_API"; then ok=1; break; fi
-            echo "== API asset failed, trying release URL"
-            if curl -fL --retry 2 --retry-delay 5 --retry-all-errors \
-                 --connect-timeout 30 --max-time 900 \
-                 --no-progress-meter -o "$SDK" "$URL_REL"; then ok=1; break; fi
-            sleep $((attempt * 15))
-          done
-          [ "$ok" = 1 ] || { echo "!! SDK download failed"; exit 1; }
+      - name: stage1
+        run: bash xnu-deps/setup.sh --stage1
 
-          ls -lh "$SDK"
-          echo "$SHA  $SDK" | sha256sum -c -
-          tar -xJf "$SDK" --wildcards '*MacOSX13.3.sdk/System/Library/Frameworks/Kernel.framework*'
-          rm -f "$SDK"
+      - name: apply-xnu
+        run: bash xnu/apply.sh
 
-          if [ ! -d MacOSX13.
+      - name: stage2
+        run: bash xnu-deps/setup.sh --stage2
+
+      - name: build
+        run: ./xnu-build.sh -j4 build 2>&1 | tee xnu-build.log
+
+      - name: collect
+        run: |
+          mkdir -p out
+          find xnu-src -type f -name "mach.development*" -exec cp {} out/ \;
+          ls -lh out
+          sha256sum out/*
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hackios-kernel
+          path: |
+            out/
+            xnu-build.log
+          retention-days: 14
