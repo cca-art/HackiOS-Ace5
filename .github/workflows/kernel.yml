@@ -33,11 +33,11 @@ jobs:
           sudo update-alternatives --install /usr/bin/clang   clang   /usr/bin/clang-18   100
           sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100
           clang --version
-          dsymutil-18 --version | head -1
+          dsymutil-18 --version | head -1 || true
 
       - name: Install Theos toolchain
         run: |
-          set -euo pipefail
+          set -eu
           export THEOS="$PWD/local/theos"
           mkdir -p "$THEOS/toolchain"
 
@@ -47,7 +47,7 @@ jobs:
 
           fetch() {
             echo "== trying $1"
-            curl -fL --retry 6 --retry-delay 5 --retry-all-errors \
+            curl -fL --retry 4 --retry-delay 5 --retry-all-errors \
                  --connect-timeout 30 --max-time 900 \
                  -H 'Accept: application/octet-stream' \
                  --no-progress-meter -o "$TOOLCHAIN" "$1"
@@ -55,16 +55,17 @@ jobs:
 
           ok=0
           for attempt in 1 2 3; do
-            if fetch "$URL_REL" && xz -t "$TOOLCHAIN" 2>/dev/null; then ok=1; break; fi
-            echo "== release URL failed (attempt $attempt)"
+            echo "---- attempt $attempt ----"
             if fetch "$URL_API" && xz -t "$TOOLCHAIN" 2>/dev/null; then ok=1; break; fi
-            echo "== API asset failed (attempt $attempt), waiting"
+            echo "== API asset failed (attempt $attempt), trying release URL"
+            if fetch "$URL_REL" && xz -t "$TOOLCHAIN" 2>/dev/null; then ok=1; break; fi
+            echo "== release URL failed (attempt $attempt), waiting"
             sleep $((attempt * 20))
           done
           if [ "$ok" != 1 ]; then
             echo "== falling back to wget"
             rm -f "$TOOLCHAIN"
-            wget -q --tries=5 --timeout=60 -O "$TOOLCHAIN" "$URL_REL"
+            wget -q --tries=5 --timeout=60 -O "$TOOLCHAIN" "$URL_API"
             xz -t "$TOOLCHAIN"
           fi
           ls -lh "$TOOLCHAIN"
@@ -72,12 +73,12 @@ jobs:
           echo "=== extracting to a scratch dir to discover the layout ==="
           rm -rf /tmp/tc && mkdir -p /tmp/tc
           tar -xJf "$TOOLCHAIN" -C /tmp/tc
-          find /tmp/tc -maxdepth 4 | head -40
+          find /tmp/tc -maxdepth 4 2>/dev/null | head -40 || true
 
-          LD=$(find /tmp/tc -type f -name ld -path '*linux/iphone/bin/*' | head -1)
+          LD=$(find /tmp/tc -type f -name ld -path '*linux/iphone/bin/*' 2>/dev/null | head -1 || true)
           if [ -z "$LD" ]; then
             echo "!! no linux/iphone/bin/ld in the archive; every 'ld' found:"
-            find /tmp/tc -type f -name 'ld*' | head -20
+            find /tmp/tc -type f -name 'ld*' 2>/dev/null | head -20 || true
             exit 1
           fi
           SRC=$(cd "$(dirname "$LD")/../../.." && pwd)
@@ -85,7 +86,71 @@ jobs:
           cp -a "$SRC"/. "$THEOS/toolchain"/
           rm -rf /tmp/tc "$TOOLCHAIN"
 
-          test -x "$THEOS/toolchain/linux/iphone/bin/ld" \
-            || { echo "!! ld still missing after copy"; ls -R "$THEOS/toolchain" | head -60; exit 1; }
+          if [ ! -x "$THEOS/toolchain/linux/iphone/bin/ld" ]; then
+            echo "!! ld still missing after copy"
+            ls -R "$THEOS/toolchain" 2>/dev/null | head -60 || true
+            exit 1
+          fi
           echo "== ld OK"
-          ls "$THEOS/toolchain/linux/iphone/bin"
+          ls "$THEOS/toolchain/linux/iphone/bin" 2>/dev/null | head -30 || true
+          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
+
+      - name: Install Theos SDK (sparse)
+        run: |
+          set -eu
+          export THEOS="$PWD/local/theos"
+          git clone --filter=blob:none --sparse --depth 1 --no-checkout \
+            https://github.com/theos/sdks.git "$THEOS/sdks"
+          cd "$THEOS/sdks"
+          git sparse-checkout init --cone
+          git sparse-checkout set iPhoneOS16.5.sdk
+          git fetch --depth 1 origin 0222fd5413cf4b9af096f37b4621afa2688572f7
+          git checkout 0222fd5413cf4b9af096f37b4621afa2688572f7
+          if [ ! -d "$THEOS/sdks/iPhoneOS16.5.sdk/usr/include" ]; then
+            echo "!! SDK missing"
+            ls -R "$THEOS/sdks" 2>/dev/null | head -40 || true
+            exit 1
+          fi
+          du -sh "$THEOS/sdks"
+          echo "SDK OK"
+
+      - name: Stage 1 - sources, host tools, SDK
+        run: bash xnu-deps/setup.sh --stage1
+
+      - name: Apply Apple XNU + HackiOS patches
+        run: bash xnu/apply.sh
+
+      - name: Stage 2 - firehose and pthread libraries
+        run: bash xnu-deps/setup.sh --stage2
+
+      - name: Build kernel
+        run: |
+          set -o pipefail
+          JOBS="${{ inputs.jobs }}"
+          [ -n "$JOBS" ] || JOBS="$(nproc)"
+          ./xnu-build.sh -j"$JOBS" build 2>&1 | tee xnu-build.log
+
+      - name: Collect kernel
+        run: |
+          set -eu
+          mkdir -p out
+          K=xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837
+          if [ -f "$K" ]; then
+            cp "$K" out/mach.ace5-public
+          else
+            echo 'expected path missing; searching'
+            find xnu-src -type f -name 'mach.development*' -exec cp {} out/ \; 2>/dev/null || true
+          fi
+          ls -lh out || true
+          sha256sum out/* 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hackios-kernel
+          if-no-files-found: warn
+          path: |
+            out/
+            xnu-build.log
+            xnu-deps/*.log
+          retention-days: 14
