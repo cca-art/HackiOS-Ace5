@@ -35,7 +35,7 @@ jobs:
           clang --version
           dsymutil-18 --version | head -1
 
-      - name: Install Theos toolchain and SDK
+      - name: Install Theos toolchain
         run: |
           set -euo pipefail
           export THEOS="$PWD/local/theos"
@@ -56,7 +56,7 @@ jobs:
           ok=0
           for attempt in 1 2 3; do
             if fetch "$URL_REL" && xz -t "$TOOLCHAIN" 2>/dev/null; then ok=1; break; fi
-            echo "== release URL failed (attempt $attempt), trying API asset"
+            echo "== release URL failed (attempt $attempt)"
             if fetch "$URL_API" && xz -t "$TOOLCHAIN" 2>/dev/null; then ok=1; break; fi
             echo "== API asset failed (attempt $attempt), waiting"
             sleep $((attempt * 20))
@@ -67,54 +67,25 @@ jobs:
             wget -q --tries=5 --timeout=60 -O "$TOOLCHAIN" "$URL_REL"
             xz -t "$TOOLCHAIN"
           fi
-
           ls -lh "$TOOLCHAIN"
-          tar -xJf "$TOOLCHAIN" -C "$THEOS/toolchain"
-          rm -f "$TOOLCHAIN"
 
-          git clone --no-checkout https://github.com/theos/sdks.git "$THEOS/sdks"
-          git -C "$THEOS/sdks" checkout --detach 0222fd5413cf4b9af096f37b4621afa2688572f7
+          echo "=== extracting to a scratch dir to discover the layout ==="
+          rm -rf /tmp/tc && mkdir -p /tmp/tc
+          tar -xJf "$TOOLCHAIN" -C /tmp/tc
+          find /tmp/tc -maxdepth 4 | head -40
 
-          test -x "$THEOS/toolchain/linux/iphone/bin/ld"
-          test -x "$THEOS/toolchain/linux/iphone/bin/ldid"
-          test -d "$THEOS/sdks/iPhoneOS16.5.sdk/usr/include"
-          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
-          echo "Theos ready: $THEOS"
-
-      - name: Stage 1 - sources, host tools, SDK
-        run: bash xnu-deps/setup.sh --stage1
-
-      - name: Apply Apple XNU + HackiOS patches
-        run: bash xnu/apply.sh
-
-      - name: Stage 2 - firehose and pthread libraries
-        run: bash xnu-deps/setup.sh --stage2
-
-      - name: Build kernel
-        run: |
-          set -o pipefail
-          JOBS="${{ inputs.jobs }}"
-          [ -n "$JOBS" ] || JOBS="$(nproc)"
-          ./xnu-build.sh -j"$JOBS" build 2>&1 | tee xnu-build.log
-
-      - name: Collect kernel
-        run: |
-          set -euo pipefail
-          mkdir -p out
-          K=xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837
-          if [ -f "$K" ]; then cp "$K" out/mach.ace5-public; else
-            echo 'expected path missing; searching'
-            find xnu-src -type f -name 'mach.development*' -exec cp {} out/ \;
+          LD=$(find /tmp/tc -type f -name ld -path '*linux/iphone/bin/*' | head -1)
+          if [ -z "$LD" ]; then
+            echo "!! no linux/iphone/bin/ld in the archive; every 'ld' found:"
+            find /tmp/tc -type f -name 'ld*' | head -20
+            exit 1
           fi
-          ls -lh out; sha256sum out/* || true
+          SRC=$(cd "$(dirname "$LD")/../../.." && pwd)
+          echo "== toolchain root inside archive: $SRC"
+          cp -a "$SRC"/. "$THEOS/toolchain"/
+          rm -rf /tmp/tc "$TOOLCHAIN"
 
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: hackios-kernel
-          if-no-files-found: warn
-          path: |
-            out/
-            xnu-build.log
-            xnu-deps/*.log
-          retention-days: 14
+          test -x "$THEOS/toolchain/linux/iphone/bin/ld" \
+            || { echo "!! ld still missing after copy"; ls -R "$THEOS/toolchain" | head -60; exit 1; }
+          echo "== ld OK"
+          ls "$THEOS/toolchain/linux/iphone/bin"
