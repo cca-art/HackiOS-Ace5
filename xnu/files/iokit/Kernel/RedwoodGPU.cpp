@@ -938,7 +938,8 @@ RedwoodGPUUserClient::userBuffer(struct redwood_user_memory * request)
 	b = newBuffer(memory, 0, request->size, request->flags, &request->handle);
 	if (b != NULL) {
 		b->memory = memory;
-		b->kernel = (uint8_t *) memory->getBytesNoCopy();
+		/* The caller's own pages: no kernel pointer of ours to push out of the cache (the submit path skips a buffer whose kernel pointer is NULL; HakiOS's driver does the same) */
+		b->kernel = NULL;
 		b->surface = NULL;
 		b->seen = true;
 	}
