@@ -28,7 +28,6 @@ jobs:
           curl -fL --retry 6 --retry-delay 5 --retry-all-errors -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/octet-stream" -o /tmp/tc.tar.xz https://api.github.com/repos/L1ghtmann/llvm-project/releases/assets/124872377
           xz -t /tmp/tc.tar.xz
           tar -xJf /tmp/tc.tar.xz -C "$THEOS/toolchain"
-          ls "$THEOS/toolchain/linux/iphone/bin" | head -20
           echo "THEOS=$THEOS" >> "$GITHUB_ENV"
 
       - name: theos-sdk
@@ -37,7 +36,6 @@ jobs:
           git clone --filter=blob:none --sparse --depth 1 https://github.com/theos/sdks.git "$THEOS/sdks"
           cd "$THEOS/sdks"
           git sparse-checkout set iPhoneOS16.5.sdk
-          ls "$THEOS/sdks/iPhoneOS16.5.sdk/usr/include" | head -20
 
       - name: macos-sdk
         run: |
@@ -48,7 +46,6 @@ jobs:
           echo "518e35eae6039b3f64e8025f4525c1c43786cc5cf39459d609852faf091e34be  sdk.tar.xz" | sha256sum -c -
           tar -xJf sdk.tar.xz --wildcards "*MacOSX13.3.sdk/System/Library/Frameworks/Kernel.framework*"
           rm -f sdk.tar.xz
-          ls MacOSX13.3.sdk/System/Library/Frameworks/Kernel.framework/Headers | head -20
 
       - name: stage1
         run: bash xnu-deps/setup.sh --stage1
@@ -63,14 +60,16 @@ jobs:
         run: |
           set -o pipefail
           JOBS="$(nproc)"
-          echo "=== building with $JOBS jobs ==="
-          ./xnu-build.sh -j"$JOBS" build 2>&1 | tee xnu-build.log || {
-            echo "=== BUILD FAILED; last 80 lines ==="
-            tail -80 xnu-build.log
+          ./xnu-build.sh -j"$JOBS" build 2>&1 | tee xnu-build.log || true
+          if grep -q 'built kernel at' xnu-build.log; then
+            echo "=== kernel built ==="
+          else
+            echo "=== BUILD FAILED (or no kernel); the first errors ==="
+            grep -n -m 40 -E 'error:|Error [0-9]|not found|No such file' xnu-build.log || true
+            echo "=== the last 20 lines ==="
+            tail -20 xnu-build.log || true
             exit 1
-          }
-          echo "=== build step returned success; looking for the kernel ==="
-          grep -c 'built kernel at' xnu-build.log || true
+          fi
 
       - name: collect
         run: |
@@ -80,15 +79,9 @@ jobs:
           if [ -f "$K" ]; then
             cp "$K" out/mach.ace5-public
           else
-            echo 'expected path missing; searching'
             find xnu-src -type f -name 'mach.development*' -exec cp {} out/ \; 2>/dev/null || true
           fi
-          if [ -z "$(ls -A out)" ]; then
-            echo '=== NO KERNEL BUILT; last 100 lines of the build log ==='
-            tail -100 xnu-build.log || true
-            echo '=== end of log ==='
-            exit 1
-          fi
+          [ -n "$(ls -A out)" ] || { echo 'no kernel'; exit 1; }
           ls -lh out
           sha256sum out/* || true
 
