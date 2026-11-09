@@ -411,6 +411,7 @@ struct gpu_buffer {
 	uint64_t                        pushed;         /* ... and when that was */
 	bool                            seen;           /* by the program: mapped, and from then on written by it */
 	uint32_t                        fence;          /* the last submission that names it (0: none has) */
+	IOMemoryMap *                   mapping;        /* a caller's own pages, mapped here so the cache can be pushed */
 };
 
 /*
@@ -548,7 +549,8 @@ RedwoodGPUUserClient::freeBuffer(struct gpu_buffer * b)
 			if (said++ < 8) {
 				IOLog("RedwoodGPU: the GPU is not done with what it was given: a buffer of %llu bytes stays its own\n", b->size);
 			}
-		} else if (b->surface == NULL && redwood_gpu_ready() && keep(b->memory, b->kernel, b->address, b->size, b->flags)) {
+		} else if (b->surface == NULL && b->mapping == NULL && redwood_gpu_ready() &&
+		    keep(b->memory, b->kernel, b->address, b->size, b->flags)) {
 			b->memory = NULL;               /* (now the kept one's) */
 		} else if (redwood_gpu_ready()) {
 			redwood_gpu_unmap(b->address, b->size);
@@ -563,6 +565,10 @@ RedwoodGPUUserClient::freeBuffer(struct gpu_buffer * b)
 	}
 	b->memory = NULL;
 	b->surface = NULL;
+	if (b->mapping != NULL) {
+		b->mapping->release();
+		b->mapping = NULL;
+	}
 	fBufferCount--;
 	fBufferBytes -= b->size;
 }
@@ -938,8 +944,14 @@ RedwoodGPUUserClient::userBuffer(struct redwood_user_memory * request)
 	b = newBuffer(memory, 0, request->size, request->flags, &request->handle);
 	if (b != NULL) {
 		b->memory = memory;
-		/* The caller's own pages: no kernel pointer of ours to push out of the cache (the submit path skips a buffer whose kernel pointer is NULL; HakiOS's driver does the same) */
-		b->kernel = NULL;
+		/*
+		 * The caller's own pages mapped into the kernel: the submit path pushes what the CPU wrote out of
+		 * the cache through this address (redwood_gpu_to_memory), which is what a no-copy buffer needs --
+		 * without it the GPU reads what memory held before the program wrote (m2v_test's "own pages":
+		 * 61392 of 65536 pixels).
+		 */
+		b->mapping = memory->createMappingInTask(kernel_task, 0, kIOMapAnywhere);
+		b->kernel = b->mapping != NULL ? (uint8_t *) b->mapping->getAddress() : NULL;
 		b->surface = NULL;
 		b->seen = true;
 	}
