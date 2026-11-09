@@ -1516,7 +1516,7 @@ class IOAcceleratorES : public IOService
 
 public:
 	virtual IOReturn setProperties(OSObject * properties) APPLE_KEXT_OVERRIDE;
-	virtual bool registerService() APPLE_KEXT_OVERRIDE;
+	virtual bool registerService(IOOptionBits options = 0) APPLE_KEXT_OVERRIDE;
 };
 
 OSDefineMetaClassAndStructors(IOAcceleratorES, IOService);
@@ -1563,11 +1563,11 @@ OSDefineMetaClassAndStructors(IOAcceleratorES, IOService);
  * while the framebuffer's own start is still on its way, and the argument is what decides it.
  */
 bool
-IOAcceleratorES::registerService()
+IOAcceleratorES::registerService(IOOptionBits options)
 {
 	uint32_t metal = 0;
 
-	if (super::registerService() == false) {
+	if (super::registerService(options) == false) {
 		return false;
 	}
 	if (PE_parse_boot_argn("metal", &metal, sizeof(metal)) && metal != 0) {
