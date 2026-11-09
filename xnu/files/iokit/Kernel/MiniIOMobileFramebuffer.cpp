@@ -1516,7 +1516,7 @@ class IOAcceleratorES : public IOService
 
 public:
 	virtual IOReturn setProperties(OSObject * properties) APPLE_KEXT_OVERRIDE;
-	virtual bool registerService(IOOptionBits options = 0) APPLE_KEXT_OVERRIDE;
+	virtual void registerService(IOOptionBits options = 0) APPLE_KEXT_OVERRIDE;
 };
 
 OSDefineMetaClassAndStructors(IOAcceleratorES, IOService);
@@ -1562,21 +1562,18 @@ OSDefineMetaClassAndStructors(IOAcceleratorES, IOService);
  * The boot argument is read here rather than through gAcceleratorTakesProperties: this runs
  * while the framebuffer's own start is still on its way, and the argument is what decides it.
  */
-bool
+void
 IOAcceleratorES::registerService(IOOptionBits options)
 {
 	uint32_t metal = 0;
 
-	if (super::registerService(options) == false) {
-		return false;
-	}
+	IOService::registerService(options);
 	if (PE_parse_boot_argn("metal", &metal, sizeof(metal)) && metal != 0) {
 		setProperty(kAcceleratorPluginNameKey, "RedwoodMetal");
 		setProperty(kAcceleratorPluginClassNameKey, "RedwoodMetalDevice");
 		IOLog("IOAcceleratorES: Metal plug-in named at registration: %s / %s\n",
 		    kAcceleratorPluginNameKey, kAcceleratorPluginClassNameKey);
 	}
-	return true;
 }
 
 IOReturn
