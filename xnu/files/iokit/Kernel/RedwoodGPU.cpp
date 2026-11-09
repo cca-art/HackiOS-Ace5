@@ -89,6 +89,7 @@ enum {
 	kMsmSubmitQueueNew      = 0x4a,
 	kMsmSubmitQueueClose    = 0x4b,
 	kMsmSubmitQueueQuery    = 0x4c,
+	kRedwoodUserMemory      = 0x7b,         /* ours: pages of the caller's own as a buffer (Linux's userptr) */
 	kRedwoodDisplayBlit     = 0x7c,         /* A750 diagnostic: IOSurface to IOSurface hardware scaling */
 	kRedwoodGPUWorked       = 0x7d,         /* ours: how long the 3D core itself has worked, and on how many */
 	kRedwoodSurface         = 0x7e,         /* ours: an IOSurface's memory as a buffer */
@@ -160,6 +161,11 @@ struct redwood_surface {
 struct redwood_show {
 	uint64_t pixels;
 	uint32_t width, height, rowBytes, pad;
+};
+struct redwood_user_memory {
+	uint64_t address, size;                 /* in the caller, in whole pages */
+	uint32_t handle;                        /* back: the buffer */
+	uint32_t flags;
 };
 /*
  * kRedwoodGPUWorked: the GPU's own side of a measurement a program makes with its own clock.
@@ -471,6 +477,7 @@ class RedwoodGPUUserClient : public IOUserClient
 	void reap(void);
 	IOReturn gemNew(struct msm_gem_new * request);
 	IOReturn surfaceBuffer(struct redwood_surface * request);
+	IOReturn userBuffer(struct redwood_user_memory * request);
 	IOReturn gemInfo(struct msm_gem_info * request);
 	IOReturn submit(struct msm_gem_submit * request);
 	IOReturn show(const struct redwood_show * request);
@@ -893,6 +900,57 @@ RedwoodGPUUserClient::surfaceBuffer(struct redwood_surface * request)
 	return kIOReturnSuccess;
 }
 
+/*
+ * Pages of the client's own as a buffer, as Linux's userptr: wired for as long as the buffer is
+ * there, entered into the GPU's address space, and pushed out of this processor's cache at every
+ * submission that names them. Vulkan's VK_EXT_external_memory_host is asked for over it (Turnip,
+ * tools/mesa/hakios-drm): Metal's no-copy buffers and CoreAnimation's backing stores.
+ */
+IOReturn
+RedwoodGPUUserClient::userBuffer(struct redwood_user_memory * request)
+{
+	IOMemoryDescriptor * memory = NULL;
+	struct gpu_buffer * b;
+
+	if ((request->address & (uint64_t)(PAGE_SIZE - 1)) || (request->size & (uint64_t)(PAGE_SIZE - 1)) || request->size == 0 ||
+	    request->size > GPU_BUFFER_MAX) {
+		return kIOReturnBadArgument;
+	}
+	IOReturn prepared = kIOReturnNoMemory;
+	for (int pass = 0; pass < 2 && prepared != kIOReturnSuccess; pass++) {
+		memory = IOMemoryDescriptor::withAddressRange(request->address, request->size,
+		    pass == 0 ? kIODirectionInOut : kIODirectionOut, fTask);
+		if (memory == NULL) {
+			return kIOReturnNoMemory;
+		}
+		prepared = memory->prepare();
+		if (prepared != kIOReturnSuccess) {
+			memory->release();
+			memory = NULL;
+		} else if (pass == 1) {
+			request->flags |= MSM_BO_GPU_READONLY;
+		}
+	}
+	if (memory == NULL) {
+		return kIOReturnVMError;
+	}
+	IOLockLock(gGPULock);
+	b = newBuffer(memory, 0, request->size, request->flags, &request->handle);
+	if (b != NULL) {
+		b->memory = memory;
+		b->kernel = (uint8_t *) memory->getBytesNoCopy();
+		b->surface = NULL;
+		b->seen = true;
+	}
+	IOLockUnlock(gGPULock);
+	if (b == NULL) {
+		memory->complete();
+		memory->release();
+		return kIOReturnNoMemory;
+	}
+	return kIOReturnSuccess;
+}
+
 IOReturn
 RedwoodGPUUserClient::gemInfo(struct msm_gem_info * request)
 {
@@ -994,7 +1052,7 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
 		} else if (!gGPUCached || (!b->seen && !gGPUSyncCached)) {
 			continue;
 		}
-		redwood_gpu_to_memory(b->kernel, b->size);
+		if (b->kernel) redwood_gpu_to_memory(b->kernel, b->size);
 		gGPUStat.flushed += b->size;
 	}
 	redwood_gpu_to_memory(NULL, 0);                 /* (and what was written last is in memory: a barrier) */
@@ -1082,7 +1140,7 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
 		for (uint32_t i = 0; i < request->nr_bos; i++) {
 			struct gpu_buffer * b = buffer(bos[i].handle);
 			if (b != NULL && b->surface == NULL) {
-				redwood_gpu_to_memory(b->kernel, b->size);
+				if (b->kernel) redwood_gpu_to_memory(b->kernel, b->size);
 			}
 		}
 	}
@@ -1211,6 +1269,7 @@ RedwoodGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArgument
 		struct msm_submitqueue_query query;
 		struct drm_gem_close close;
 		struct redwood_surface surface;
+		struct redwood_user_memory user;
 		struct redwood_show show;
 		struct redwood_worked worked;
 		struct redwood_blit blit;
@@ -1310,6 +1369,9 @@ RedwoodGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArgument
 		IOLockLock(gGPULock);
 		redwood_gpu_worked(&r.worked.microseconds, &r.worked.submissions, r.worked.by);
 		IOLockUnlock(gGPULock);
+		break;
+	case kRedwoodUserMemory:
+		ret = userBuffer(&r.user);
 		break;
 	case kRedwoodSurface:
 		ret = surfaceBuffer(&r.surface);
