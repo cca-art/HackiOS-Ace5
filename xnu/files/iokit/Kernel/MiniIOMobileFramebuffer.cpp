@@ -1516,6 +1516,7 @@ class IOAcceleratorES : public IOService
 
 public:
 	virtual IOReturn setProperties(OSObject * properties) APPLE_KEXT_OVERRIDE;
+	virtual bool registerService() APPLE_KEXT_OVERRIDE;
 };
 
 OSDefineMetaClassAndStructors(IOAcceleratorES, IOService);
@@ -1550,6 +1551,34 @@ OSDefineMetaClassAndStructors(IOAcceleratorES, IOService);
  * Everything else is refused, and refused whole, before anything is set: every process on the
  * machine can reach this method and the only thing it exists for is this one switch.
  */
+/*
+ * The two names Metal reads are published HERE, when the service registers, and not left to user
+ * space alone. Measured on 2026-11-09: launchd and the daemons it starts are born before rc.jobs
+ * reaches /redwood/bin/metal_props, so backboardd asked Metal for a device while the service
+ * carried neither name -- the same probe read "MetalPluginName = RedwoodMetal" as root before
+ * launchd and "(none)" as mobile after it -- and the window server stayed on OpenGL ES. With
+ * them set at registration they exist before any process is born.
+ *
+ * The boot argument is read here rather than through gAcceleratorTakesProperties: this runs
+ * while the framebuffer's own start is still on its way, and the argument is what decides it.
+ */
+bool
+IOAcceleratorES::registerService()
+{
+	uint32_t metal = 0;
+
+	if (super::registerService() == false) {
+		return false;
+	}
+	if (PE_parse_boot_argn("metal", &metal, sizeof(metal)) && metal != 0) {
+		setProperty(kAcceleratorPluginNameKey, "RedwoodMetal");
+		setProperty(kAcceleratorPluginClassNameKey, "RedwoodMetalDevice");
+		IOLog("IOAcceleratorES: Metal plug-in named at registration: %s / %s\n",
+		    kAcceleratorPluginNameKey, kAcceleratorPluginClassNameKey);
+	}
+	return true;
+}
+
 IOReturn
 IOAcceleratorES::setProperties(OSObject * properties)
 {
