@@ -3,6 +3,9 @@ name: HackiOS Ace 5 kernel
 on:
   workflow_dispatch:
 
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
 jobs:
   kernel:
     runs-on: ubuntu-24.04-arm
@@ -22,7 +25,7 @@ jobs:
           set -ex
           THEOS=$PWD/local/theos
           mkdir -p "$THEOS/toolchain"
-          curl -fL --retry 6 --retry-delay 5 --retry-all-errors -H "Accept: application/octet-stream" -o /tmp/tc.tar.xz https://api.github.com/repos/L1ghtmann/llvm-project/releases/assets/124872377
+          curl -fL --retry 6 --retry-delay 5 --retry-all-errors -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/octet-stream" -o /tmp/tc.tar.xz https://api.github.com/repos/L1ghtmann/llvm-project/releases/assets/124872377
           xz -t /tmp/tc.tar.xz
           tar -xJf /tmp/tc.tar.xz -C "$THEOS/toolchain"
           ls "$THEOS/toolchain/linux/iphone/bin" | head -20
@@ -41,7 +44,7 @@ jobs:
           set -ex
           mkdir -p xnu-deps
           cd xnu-deps
-          curl -fL --retry 6 --retry-delay 5 --retry-all-errors -H "Accept: application/octet-stream" -o sdk.tar.xz https://api.github.com/repos/joseluisq/macosx-sdks/releases/assets/122062330
+          curl -fL --retry 6 --retry-delay 5 --retry-all-errors -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/octet-stream" -o sdk.tar.xz https://api.github.com/repos/joseluisq/macosx-sdks/releases/assets/122062330
           echo "518e35eae6039b3f64e8025f4525c1c43786cc5cf39459d609852faf091e34be  sdk.tar.xz" | sha256sum -c -
           tar -xJf sdk.tar.xz --wildcards "*MacOSX13.3.sdk/System/Library/Frameworks/Kernel.framework*"
           rm -f sdk.tar.xz
@@ -57,19 +60,43 @@ jobs:
         run: bash xnu-deps/setup.sh --stage2
 
       - name: build
-        run: ./xnu-build.sh -j4 build 2>&1 | tee xnu-build.log
+        run: |
+          set -o pipefail
+          JOBS="$(nproc)"
+          echo "=== building with $JOBS jobs ==="
+          ./xnu-build.sh -j"$JOBS" build 2>&1 | tee xnu-build.log || {
+            echo "=== BUILD FAILED; last 80 lines ==="
+            tail -80 xnu-build.log
+            exit 1
+          }
+          echo "=== build step returned success; looking for the kernel ==="
+          grep -c 'built kernel at' xnu-build.log || true
 
       - name: collect
         run: |
+          set -eu
           mkdir -p out
-          find xnu-src -type f -name "mach.development*" -exec cp {} out/ \;
+          K=xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837
+          if [ -f "$K" ]; then
+            cp "$K" out/mach.ace5-public
+          else
+            echo 'expected path missing; searching'
+            find xnu-src -type f -name 'mach.development*' -exec cp {} out/ \; 2>/dev/null || true
+          fi
+          if [ -z "$(ls -A out)" ]; then
+            echo '=== NO KERNEL BUILT; last 100 lines of the build log ==='
+            tail -100 xnu-build.log || true
+            echo '=== end of log ==='
+            exit 1
+          fi
           ls -lh out
-          sha256sum out/*
+          sha256sum out/* || true
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: hackios-kernel
+          if-no-files-found: warn
           path: |
             out/
             xnu-build.log
